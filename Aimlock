@@ -10,18 +10,22 @@ if getgenv and getgenv().DeltaAimlockUnload then
     pcall(getgenv().DeltaAimlockUnload)
 end
 
+-- [EDIT 1] Everything starts OFF so nothing runs until the GUI enables it
 local Settings = {
-    Active = true,
+    Active = false,
     AimPart = "Head",
-    TargetPlayers = true,
-    TargetNPCs = true,
-    TeamCheck = true,
-    WallCheck = true,
-    UseFOV = true,
+    TargetPlayers = false,
+    TargetNPCs = false,
+    TeamCheck = false,
+    WallCheck = false,
+    UseFOV = false,
     FOVRadius = 250,
-    Smoothing = 2,
+    Smoothing = 0.5,
     MaxDistance = 500,
 }
+
+-- [EDIT 1] Share the live table with the GUI (GUI writes into this)
+if getgenv then getgenv().Aimlock_Config = Settings end
 
 local MIN_DIST = 2
 local MAX_RAYS = 10
@@ -252,6 +256,10 @@ local function Unload()
     for _, c in ipairs(Connections) do pcall(function() c:Disconnect() end) end
     table.clear(Connections)
     table.clear(NPCs)
-    if getgenv then getgenv().DeltaAimlockUnload = nil end
+    -- [EDIT 2] also clear the shared config on unload
+    if getgenv then
+        getgenv().DeltaAimlockUnload = nil
+        getgenv().Aimlock_Config = nil
+    end
 end
 if getgenv then getgenv().DeltaAimlockUnload = Unload end
