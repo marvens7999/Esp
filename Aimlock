@@ -1,9 +1,8 @@
--- Delta Aimlock v19 | Roblox (Luau) | Delta executor | Rayfield UI
--- v17 targeting logic + menu + stability fixes. Unload: getgenv().DeltaAimlockUnload()
+-- Delta Aimlock v19 | Roblox (Luau) | Delta executor (No GUI)
+-- Unload: getgenv().DeltaAimlockUnload()
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
-local CoreGui = game:GetService("CoreGui")
 
 local LocalPlayer = Players.LocalPlayer
 
@@ -20,18 +19,17 @@ local Settings = {
     WallCheck = true,
     UseFOV = true,
     FOVRadius = 250,
-    Smoothing = 2,        -- 0.05 - 2, 2 = hard lock (instant), lower = softer pull
+    Smoothing = 2,
     MaxDistance = 500,
 }
 
-local MIN_DIST = 2        -- ignore anything this close (viewmodels / rigs on the camera)
-local MAX_RAYS = 10       -- wall-check budget per frame
-local STICKY = 0.7        -- current target's score multiplier; lower = harder to lose the lock
+local MIN_DIST = 2
+local MAX_RAYS = 10
+local STICKY = 0.7
 
 local Connections = {}
 local CurrentPart, CurrentChar = nil, nil
 local NPCs = {}
-local MainToggle = nil
 
 -- ============================== TEAM DETECTION ==============================
 local TEAM_KEYS = { "Team", "TeamName", "TeamColor", "TeamID" }
@@ -60,7 +58,6 @@ local function GetLocalTeamKeys()
     return keys
 end
 
--- localKeys is built once per frame and passed in (v17 rebuilt it for every NPC)
 local function IsSameTeam(model, isPlayer, localKeys)
     if not Settings.TeamCheck then return false end
     if isPlayer then
@@ -80,7 +77,7 @@ local function RegisterModel(model)
     if Players:GetPlayerFromCharacter(model) then return end
     if model == LocalPlayer.Character or model.Name == LocalPlayer.Name then return end
     local cam = workspace.CurrentCamera
-    if cam and model:IsDescendantOf(cam) then return end -- first-person viewmodels
+    if cam and model:IsDescendantOf(cam) then return end
     if model:FindFirstChildOfClass("Humanoid") then
         NPCs[model] = true
     end
@@ -120,7 +117,6 @@ local function GetBestPart(char)
     return nil
 end
 
--- one reused RaycastParams (v17 made a new one per candidate per frame)
 local rayParams = RaycastParams.new()
 rayParams.FilterType = Enum.RaycastFilterType.Exclude
 rayParams.IgnoreWater = true
@@ -142,9 +138,9 @@ local function IsVisible(part, char, camera)
 
         local model = inst:FindFirstAncestorOfClass("Model")
         if model and model:FindFirstChildOfClass("Humanoid") then
-            table.insert(ignore, model)          -- another body, not a wall
+            table.insert(ignore, model)
         elseif inst.Transparency >= 0.9 or not inst.CanCollide then
-            table.insert(ignore, inst)           -- glass, triggers, invisible parts
+            table.insert(ignore, inst)
         else
             return false
         end
@@ -168,13 +164,13 @@ local function FindTarget(camera)
         if dist ~= dist or dist < MIN_DIST or dist > Settings.MaxDistance then return end
 
         local pos, onScreen = camera:WorldToViewportPoint(pos3)
-        if not onScreen then return end -- always required, so it never spins to someone behind you
+        if not onScreen then return end
 
         local screenDist = (Vector2.new(pos.X, pos.Y) - center).Magnitude
         if Settings.UseFOV and screenDist > Settings.FOVRadius then return end
 
         local score = screenDist
-        if char == CurrentChar then score = score * STICKY end -- stops flipping between two close targets
+        if char == CurrentChar then score = score * STICKY end
         table.insert(scored, { score = score, part = part, char = char })
     end
 
@@ -206,7 +202,6 @@ local function FindTarget(camera)
         return nil, nil
     end
 
-    -- raycast only down the sorted list, capped per frame
     for i, e in ipairs(scored) do
         if i > MAX_RAYS then break end
         if IsVisible(e.part, e.char, camera) then
@@ -216,8 +211,6 @@ local function FindTarget(camera)
     return nil, nil
 end
 
--- ============================== AIM MATH ==============================
--- guards against NaN and the flip when the target is straight above/below the camera
 local function LookCF(from, to)
     local dir = to - from
     if dir.Magnitude < 0.05 or dir.X ~= dir.X or dir.Y ~= dir.Y or dir.Z ~= dir.Z then
@@ -228,64 +221,12 @@ local function LookCF(from, to)
     return CFrame.lookAt(from, to, up)
 end
 
--- ============================== OVERLAY UI ==============================
-local Gui = Instance.new("ScreenGui")
-Gui.Name = "DeltaAimlockOverlay"
-Gui.ResetOnSpawn = false
-Gui.IgnoreGuiInset = true
-Gui.DisplayOrder = 999
-pcall(function() Gui.Parent = (gethui and gethui()) or CoreGui end)
-if not Gui.Parent then Gui.Parent = LocalPlayer:WaitForChild("PlayerGui") end
-
-local FOVFrame = Instance.new("Frame")
-FOVFrame.AnchorPoint = Vector2.new(0.5, 0.5)
-FOVFrame.BackgroundTransparency = 1
-FOVFrame.Parent = Gui
-Instance.new("UICorner", FOVFrame).CornerRadius = UDim.new(1, 0)
-local FOVStroke = Instance.new("UIStroke", FOVFrame)
-FOVStroke.Thickness = 1.5
-FOVStroke.Color = Color3.new(1, 1, 1)
-
-local Button = Instance.new("TextButton")
-Button.Size = UDim2.fromOffset(64, 64)
-Button.Position = UDim2.new(1, -90, 0.5, -32)
-Button.BackgroundColor3 = Color3.fromRGB(30, 30, 38)
-Button.TextColor3 = Color3.new(1, 1, 1)
-Button.Font = Enum.Font.GothamBold
-Button.TextSize = 13
-Button.Parent = Gui
-Instance.new("UICorner", Button).CornerRadius = UDim.new(1, 0)
-local ButtonStroke = Instance.new("UIStroke", Button)
-ButtonStroke.Thickness = 2
-
-local function Refresh()
-    Button.Text = Settings.Active and "AIM\nON" or "AIM\nOFF"
-    ButtonStroke.Color = Settings.Active and Color3.fromRGB(80, 220, 120) or Color3.fromRGB(120, 120, 130)
-end
-
-local function SetActive(v)
-    Settings.Active = v
-    if not v then CurrentPart, CurrentChar = nil, nil end
-    Refresh()
-end
-
-table.insert(Connections, Button.Activated:Connect(function()
-    SetActive(not Settings.Active)
-    if MainToggle then pcall(function() MainToggle:Set(Settings.Active) end) end
-end))
-Refresh()
-
 -- ============================== RENDER STEP ==============================
 local STEP_NAME = "DeltaAimlockV19"
 
 RunService:BindToRenderStep(STEP_NAME, Enum.RenderPriority.Last.Value + 1, function(dt)
     local camera = workspace.CurrentCamera
     if not camera then return end
-
-    local center = camera.ViewportSize / 2
-    FOVFrame.Visible = Settings.Active and Settings.UseFOV
-    FOVFrame.Size = UDim2.fromOffset(Settings.FOVRadius * 2, Settings.FOVRadius * 2)
-    FOVFrame.Position = UDim2.fromOffset(center.X, center.Y)
 
     if not Settings.Active then return end
 
@@ -296,7 +237,6 @@ RunService:BindToRenderStep(STEP_NAME, Enum.RenderPriority.Last.Value + 1, funct
         local camCF = camera.CFrame
         local goal = LookCF(camCF.Position, part.Position)
         if goal then
-            -- snap speed 0.05 - 2: s/2 is the per-frame (at 60fps) pull, so 2 = instant hard lock
             local s = math.clamp(Settings.Smoothing, 0.05, 2)
             local alpha = (s >= 1.98) and 1 or (1 - (1 - s / 2) ^ (dt * 60))
             camera.CFrame = camCF:Lerp(goal, alpha)
@@ -312,86 +252,6 @@ local function Unload()
     for _, c in ipairs(Connections) do pcall(function() c:Disconnect() end) end
     table.clear(Connections)
     table.clear(NPCs)
-    Gui:Destroy()
     if getgenv then getgenv().DeltaAimlockUnload = nil end
 end
 if getgenv then getgenv().DeltaAimlockUnload = Unload end
-
--- ============================== RAYFIELD MENU ==============================
-local function Pick(o)
-    return type(o) == "table" and o[1] or o
-end
-
-task.spawn(function()
-    local ok, Rayfield = pcall(function()
-        return loadstring(game:HttpGet("https://sirius.menu/rayfield"))()
-    end)
-    if not (ok and Rayfield) then return end -- still works through the AIM button
-
-    pcall(function()
-        local Window = Rayfield:CreateWindow({
-            Name = "Delta Aimlock v19",
-            LoadingTitle = "Delta Aimlock",
-            LoadingSubtitle = "v19",
-            ConfigurationSaving = { Enabled = false },
-            Discord = { Enabled = false },
-            KeySystem = false,
-        })
-
-        local Tab = Window:CreateTab("Aimlock", 4483362458)
-
-        MainToggle = Tab:CreateToggle({
-            Name = "Aimlock", CurrentValue = true, Flag = "Active",
-            Callback = function(v) SetActive(v) end,
-        })
-
-        Tab:CreateToggle({
-            Name = "Target Players", CurrentValue = true, Flag = "TPlayers",
-            Callback = function(v) Settings.TargetPlayers = v end,
-        })
-
-        Tab:CreateToggle({
-            Name = "Target NPCs", CurrentValue = true, Flag = "TNPCs",
-            Callback = function(v) Settings.TargetNPCs = v end,
-        })
-
-        Tab:CreateToggle({
-            Name = "Team Check", CurrentValue = true, Flag = "Team",
-            Callback = function(v) Settings.TeamCheck = v end,
-        })
-
-        Tab:CreateToggle({
-            Name = "Wall Check", CurrentValue = true, Flag = "Wall",
-            Callback = function(v) Settings.WallCheck = v end,
-        })
-
-        Tab:CreateToggle({
-            Name = "FOV Filter", CurrentValue = true, Flag = "UseFOV",
-            Callback = function(v) Settings.UseFOV = v end,
-        })
-
-        Tab:CreateDropdown({
-            Name = "Aim Part", Options = { "Head", "Torso" },
-            CurrentOption = { "Head" }, MultipleOptions = false, Flag = "AimPart",
-            Callback = function(o) Settings.AimPart = Pick(o) end,
-        })
-
-        Tab:CreateSlider({
-            Name = "FOV Size", Range = { 50, 700 }, Increment = 10,
-            Suffix = " px", CurrentValue = 250, Flag = "FOV",
-            Callback = function(v) Settings.FOVRadius = v end,
-        })
-
-        Tab:CreateSlider({
-            Name = "Max Distance", Range = { 50, 3000 }, Increment = 50,
-            Suffix = " studs", CurrentValue = 500, Flag = "MaxDist",
-            Callback = function(v) Settings.MaxDistance = v end,
-        })
-
-        Tab:CreateSlider({
-            Name = "Snap Speed (2 = hard lock)", Range = { 0.05, 2 }, Increment = 0.05,
-            CurrentValue = 2, Flag = "Snap",
-            Callback = function(v) Settings.Smoothing = v end,
-        })
-    end)
-end)
