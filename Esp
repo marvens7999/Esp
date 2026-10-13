@@ -1,0 +1,1011 @@
+Esp 
+
+--[[
+    Universal ESP v5 - Roblox (Luau)
+    Renderer : ScreenGui instances (no Drawing API needed, works on any executor)
+    GUI      : Removed (headless/script-only version, RightShift toggles ESP)
+
+    VISUALS  : full or corner boxes, translucent gradient fill, pulsing glow,
+               names, health bar (smoothed) + number, distance, held tool,
+               tracers, skeleton, head dot, look-direction line, chams
+    THEMES   : Ice (default), Rainbow, Aurora, Sunset, Ocean, Neon, Fire, Toxic,
+               Vapor, Galaxy, Candy, Forest, Cyberpunk, Blood, Gold, Midnight,
+               Matrix, Sakura, Royal, Pastel, Custom (2 colours), Static
+    ANIMATION: lock-on box snap, fade-in, spinning gradient borders, pulsing
+               glow / chams, low-health pulse, scrolling theme colours
+    VIEW     : off-screen arrows, watermark with FPS/targets, and a minimap that
+               shows the REAL map layout (terrain, buildings, water) built from
+               a live top-down scan around you, with player dots, camera cone,
+               rotation and a north marker
+
+    Run      : paste into your executor and execute. RightShift toggles ESP.
+               getgenv().ESP_Unload() removes everything.
+]]
+
+if getgenv().ESP_Unload then pcall(getgenv().ESP_Unload) end
+
+local Players          = game:GetService("Players")
+local RunService       = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local Workspace        = game:GetService("Workspace")
+local CoreGui          = game:GetService("CoreGui")
+
+local LocalPlayer = Players.LocalPlayer
+local Camera      = Workspace.CurrentCamera
+local Terrain     = Workspace:FindFirstChildOfClass("Terrain")
+
+----------------------------------------------------------------------
+-- CONFIG
+----------------------------------------------------------------------
+local Config = {
+    Enabled          = true,
+    ToggleKey        = Enum.KeyCode.RightShift,
+    TeamCheck        = true,
+    MaxDistance      = 2500,
+
+    -- elements
+    Boxes            = true,
+    BoxStyle         = "Corners",   -- "Corners" | "Full"
+    BoxFill          = true,
+    FillTransparency = 0.88,
+    Glow             = true,
+    Names            = true,
+    Health           = true,
+    HealthText       = true,
+    Distance         = true,
+    Tool             = true,
+    Tracers          = true,
+    TracerOrigin     = "Bottom",    -- "Bottom" | "Center" | "Top" | "Mouse"
+    Skeleton         = true,
+    HeadDot          = true,
+    LookDir          = true,
+    Chams            = true,
+    ChamFill         = 0.55,
+    TextSize         = 13,
+
+    -- colour
+    Theme            = "Ice",
+    ThemeSpeed       = 0.35,        -- palette cycles per second
+    UseTeamColor     = false,       -- Static theme only
+    EnemyColor       = Color3.fromRGB(255, 70, 70),
+    AllyColor        = Color3.fromRGB(70, 255, 130),
+    Custom1          = Color3.fromRGB(255, 0, 128),
+    Custom2          = Color3.fromRGB(0, 200, 255),
+
+    -- animation
+    Animations       = true,
+
+    -- view
+    Arrows           = true,
+    ArrowRadius      = 0.38,        -- fraction of the smaller screen side
+    Radar            = true,        -- minimap on/off
+    RadarMap         = true,        -- draw the real map layout under the dots
+    RadarRotate      = true,        -- rotate with the camera (off = north up)
+    MapDetail        = "Medium",    -- "Low" | "Medium" | "High"
+    MapTransparency  = 0.1,
+    RadarSize        = 200,
+    RadarRange       = 160,         -- studs from you to the minimap edge
+    Watermark        = true,
+}
+
+----------------------------------------------------------------------
+-- THEMES
+----------------------------------------------------------------------
+local function C(r, g, b) return Color3.fromRGB(r, g, b) end
+
+local Themes = {
+    Ice       = { C(255, 255, 255), C(170, 232, 255), C(70, 160, 255), C(205, 242, 255) },
+    Rainbow   = { C(255, 0, 0), C(255, 165, 0), C(255, 255, 0), C(0, 255, 0), C(0, 200, 255), C(80, 80, 255), C(200, 0, 255) },
+    Aurora    = { C(0, 255, 170), C(0, 200, 255), C(130, 90, 255), C(255, 60, 200) },
+    Sunset    = { C(255, 94, 58), C(255, 45, 120), C(160, 50, 220), C(255, 160, 60) },
+    Ocean     = { C(0, 255, 230), C(0, 150, 255), C(30, 60, 220), C(0, 210, 200) },
+    Neon      = { C(255, 0, 200), C(0, 255, 255), C(255, 255, 0), C(120, 0, 255) },
+    Fire      = { C(255, 30, 0), C(255, 120, 0), C(255, 220, 0), C(255, 60, 0) },
+    Toxic     = { C(60, 255, 0), C(190, 255, 0), C(0, 255, 130), C(120, 255, 40) },
+    Vapor     = { C(255, 113, 206), C(1, 205, 254), C(5, 255, 161), C(185, 103, 255) },
+    Galaxy    = { C(40, 20, 120), C(120, 50, 230), C(255, 60, 200), C(60, 190, 255) },
+    Candy     = { C(255, 150, 200), C(160, 210, 255), C(170, 255, 220), C(215, 175, 255) },
+    Forest    = { C(20, 140, 60), C(60, 220, 120), C(170, 240, 90), C(0, 170, 130) },
+    Cyberpunk = { C(255, 235, 0), C(255, 0, 130), C(0, 240, 255), C(140, 0, 255) },
+    Blood     = { C(120, 0, 10), C(220, 20, 40), C(255, 70, 70), C(160, 0, 25) },
+    Gold      = { C(255, 215, 0), C(255, 245, 170), C(230, 160, 20), C(255, 230, 90) },
+    Midnight  = { C(25, 25, 110), C(70, 60, 200), C(130, 90, 255), C(40, 120, 230) },
+    Matrix    = { C(0, 70, 20), C(0, 200, 60), C(130, 255, 160), C(0, 150, 40) },
+    Sakura    = { C(255, 183, 197), C(255, 255, 255), C(255, 120, 160), C(255, 210, 225) },
+    Royal     = { C(90, 30, 170), C(150, 70, 240), C(255, 205, 60), C(120, 50, 200) },
+    Pastel    = { C(255, 179, 186), C(255, 223, 186), C(186, 255, 201), C(186, 225, 255) },
+}
+
+-- periodic palette sampler: x wraps, so animated palettes loop seamlessly
+local function sample(stops, x)
+    local n = #stops
+    local p = (x % 1) * n
+    local i = math.floor(p)
+    local f = p - i
+    return stops[i % n + 1]:Lerp(stops[(i + 1) % n + 1], f)
+end
+
+local function currentStops()
+    if Config.Theme == "Custom" then return { Config.Custom1, Config.Custom2 } end
+    return Themes[Config.Theme] -- nil for "Static"
+end
+
+local function buildSeq(stops, phase)
+    local N, kps = 12, {}
+    for i = 0, N do
+        kps[#kps + 1] = ColorSequenceKeypoint.new(i / N, sample(stops, phase + i / N))
+    end
+    return ColorSequence.new(kps)
+end
+
+----------------------------------------------------------------------
+-- BONE MAPS
+----------------------------------------------------------------------
+local R15_BONES = {
+    {"Head", "UpperTorso"}, {"UpperTorso", "LowerTorso"},
+    {"UpperTorso", "LeftUpperArm"},  {"LeftUpperArm", "LeftLowerArm"},   {"LeftLowerArm", "LeftHand"},
+    {"UpperTorso", "RightUpperArm"}, {"RightUpperArm", "RightLowerArm"}, {"RightLowerArm", "RightHand"},
+    {"LowerTorso", "LeftUpperLeg"},  {"LeftUpperLeg", "LeftLowerLeg"},   {"LeftLowerLeg", "LeftFoot"},
+    {"LowerTorso", "RightUpperLeg"}, {"RightUpperLeg", "RightLowerLeg"}, {"RightLowerLeg", "RightFoot"},
+}
+local R6_BONES = {
+    {"Head", "Torso"}, {"Torso", "Left Arm"}, {"Torso", "Right Arm"},
+    {"Torso", "Left Leg"}, {"Torso", "Right Leg"},
+}
+local MAX_BONES = #R15_BONES
+
+local WHITE     = Color3.new(1, 1, 1)
+local BLACK     = Color3.new(0, 0, 0)
+local WHITE_SEQ = ColorSequence.new(WHITE)
+
+----------------------------------------------------------------------
+-- ROOT GUI
+----------------------------------------------------------------------
+local function getGuiParent()
+    if gethui then
+        local ok, h = pcall(gethui)
+        if ok and h then return h end
+    end
+    local ok = pcall(function() return CoreGui.Name end)
+    if ok then return CoreGui end
+    return LocalPlayer:WaitForChild("PlayerGui")
+end
+
+local Root = Instance.new("ScreenGui")
+Root.Name           = "ESPRoot"
+Root.IgnoreGuiInset = true   -- keeps coordinates identical to WorldToViewportPoint
+Root.ResetOnSpawn   = false
+Root.DisplayOrder   = 999
+Root.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+pcall(function() if syn and syn.protect_gui then syn.protect_gui(Root) end end)
+Root.Parent = getGuiParent()
+
+----------------------------------------------------------------------
+-- INSTANCE HELPERS
+----------------------------------------------------------------------
+local function newFrame(parent, props)
+    local f = Instance.new("Frame")
+    f.BorderSizePixel = 0
+    f.BackgroundTransparency = 1
+    for k, v in pairs(props or {}) do f[k] = v end
+    f.Parent = parent
+    return f
+end
+
+local function addStroke(parent, thickness, color)
+    local s = Instance.new("UIStroke")
+    s.Thickness       = thickness
+    s.Color           = color or WHITE
+    s.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+    s.Parent          = parent
+    return s
+end
+
+local function addGradient(parent)
+    local g = Instance.new("UIGradient")
+    g.Enabled = false
+    g.Parent  = parent
+    return g
+end
+
+local function addCorner(parent)
+    local c = Instance.new("UICorner")
+    c.CornerRadius = UDim.new(1, 0)
+    c.Parent = parent
+    return c
+end
+
+local function newLabel(parent, size, anchor)
+    local l = Instance.new("TextLabel")
+    l.BackgroundTransparency = 1
+    l.BorderSizePixel        = 0
+    l.AutomaticSize          = Enum.AutomaticSize.XY
+    l.Size                   = UDim2.new()
+    l.AnchorPoint            = anchor
+    l.Font                   = Enum.Font.GothamBold
+    l.TextSize               = size
+    l.TextColor3             = WHITE
+    l.TextStrokeTransparency = 0
+    l.TextStrokeColor3       = BLACK
+    l.Parent                 = parent
+    return l
+end
+
+local function setLine(f, a, b, thickness)
+    local d = b - a
+    f.Position = UDim2.fromOffset((a.X + b.X) / 2, (a.Y + b.Y) / 2)
+    f.Size     = UDim2.fromOffset(d.Magnitude, thickness)
+    f.Rotation = math.deg(math.atan2(d.Y, d.X))
+    f.Visible  = true
+end
+
+local function tint(inst, prop, grad, color, ctx)
+    if ctx.seq then
+        inst[prop]   = WHITE
+        grad.Color   = ctx.seq
+        grad.Enabled = true
+    else
+        grad.Enabled = false
+        inst[prop]   = color
+    end
+end
+
+local function colorAt(ctx, static, x)
+    if ctx.stops then return sample(ctx.stops, ctx.phase + x) end
+    return static
+end
+
+local function hpColor(f)
+    if f > 0.5 then
+        return Color3.fromRGB(255, 220, 0):Lerp(Color3.fromRGB(0, 255, 90), (f - 0.5) * 2)
+    end
+    return Color3.fromRGB(255, 30, 30):Lerp(Color3.fromRGB(255, 220, 0), f * 2)
+end
+
+----------------------------------------------------------------------
+-- MATH / TEAM HELPERS
+----------------------------------------------------------------------
+local function worldToScreen(pos)
+    local v, onScreen = Camera:WorldToViewportPoint(pos)
+    return Vector2.new(v.X, v.Y), onScreen, v.Z
+end
+
+local function isTeammate(plr)
+    return plr.Team ~= nil and plr.Team == LocalPlayer.Team
+end
+
+local function staticColor(plr)
+    if Config.UseTeamColor and plr.Team then return plr.TeamColor.Color end
+    if isTeammate(plr) then return Config.AllyColor end
+    return Config.EnemyColor
+end
+
+local function tracerStart()
+    local vp, o = Camera.ViewportSize, Config.TracerOrigin
+    if o == "Center" then return Vector2.new(vp.X / 2, vp.Y / 2) end
+    if o == "Top"    then return Vector2.new(vp.X / 2, 0) end
+    if o == "Mouse"  then return UserInputService:GetMouseLocation() end
+    return Vector2.new(vp.X / 2, vp.Y)
+end
+
+local function radarPhi()
+    if not Config.RadarRotate then return 0 end
+    local lv = Camera.CFrame.LookVector
+    if math.abs(lv.X) + math.abs(lv.Z) < 1e-3 then return 0 end
+    return -math.pi / 2 - math.atan2(lv.Z, lv.X)
+end
+
+----------------------------------------------------------------------
+-- MINIMAP FRAME + OVERLAYS
+----------------------------------------------------------------------
+local Radar = newFrame(Root, {
+    BackgroundTransparency = 0.25,
+    BackgroundColor3 = Color3.fromRGB(8, 8, 14),
+    AnchorPoint = Vector2.new(1, 0),
+    Position = UDim2.new(1, -20, 0, 20),
+    Size = UDim2.fromOffset(Config.RadarSize, Config.RadarSize),
+    ClipsDescendants = true,
+    Visible = Config.Radar,
+})
+local radarStroke = addStroke(Radar, 2)
+local radarGrad   = addGradient(radarStroke)
+
+local Plane = newFrame(Radar, {
+    AnchorPoint = Vector2.new(0.5, 0.5),
+    Position = UDim2.fromScale(0.5, 0.5),
+    Size = UDim2.fromOffset(10, 10),
+})
+
+for _, s in ipairs({ 0.66, 0.33 }) do
+    local ring = newFrame(Radar, {
+        AnchorPoint = Vector2.new(0.5, 0.5),
+        Position = UDim2.fromScale(0.5, 0.5),
+        Size = UDim2.fromScale(s, s),
+    })
+    addCorner(ring)
+    addStroke(ring, 1, WHITE).Transparency = 0.75
+end
+newFrame(Radar, { BackgroundTransparency = 0.85, BackgroundColor3 = WHITE, AnchorPoint = Vector2.new(0.5, 0.5),
+    Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.new(1, 0, 0, 1) })
+newFrame(Radar, { BackgroundTransparency = 0.85, BackgroundColor3 = WHITE, AnchorPoint = Vector2.new(0.5, 0.5),
+    Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.new(0, 1, 1, 0) })
+
+local fovL = newFrame(Radar, { BackgroundTransparency = 0.4, BackgroundColor3 = WHITE, AnchorPoint = Vector2.new(0.5, 0.5), Visible = false })
+local fovR = newFrame(Radar, { BackgroundTransparency = 0.4, BackgroundColor3 = WHITE, AnchorPoint = Vector2.new(0.5, 0.5), Visible = false })
+
+local sweeps = {}
+for i, tr in ipairs({ 0.15, 0.55, 0.8 }) do
+    local f = newFrame(Radar, { BackgroundTransparency = tr, BackgroundColor3 = WHITE, AnchorPoint = Vector2.new(0.5, 0.5) })
+    local g = Instance.new("UIGradient")
+    g.Transparency = NumberSequence.new(1, 0)
+    g.Parent = f
+    sweeps[i] = { f = f, g = g }
+end
+
+local northLabel = newLabel(Radar, 13, Vector2.new(0.5, 0.5))
+northLabel.Text = "N"
+northLabel.TextColor3 = Color3.fromRGB(255, 90, 90)
+
+local selfDot = newFrame(Radar, {
+    BackgroundTransparency = 0, BackgroundColor3 = WHITE,
+    AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(7, 7),
+})
+addCorner(selfDot)
+addStroke(selfDot, 1, BLACK)
+
+----------------------------------------------------------------------
+-- MINIMAP MAP SCAN
+----------------------------------------------------------------------
+local DETAIL = { Low = 28, Medium = 40, High = 52 }
+local PLANE_FACTOR = 1.5
+
+local VOID  = Color3.fromRGB(12, 12, 20)
+local WATER = Color3.fromRGB(35, 105, 200)
+local GREYC = Color3.fromRGB(120, 120, 120)
+local LIGHT = Vector3.new(-0.45, 0.8, -0.4).Unit
+
+local mapRayParams = RaycastParams.new()
+mapRayParams.FilterType  = Enum.RaycastFilterType.Exclude
+mapRayParams.IgnoreWater = false
+pcall(function() mapRayParams.RespectCanCollide = true end)
+
+local function refreshFilter()
+    local list = {}
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p.Character then list[#list + 1] = p.Character end
+    end
+    mapRayParams.FilterDescendantsInstances = list
+end
+
+local mapColor, mapTime, cacheCount = {}, {}, 0
+local cells, cellColor = {}, {}
+local gridN, cellPx, cellStuds = 0, 1, 1
+local cx0, cz0 = 0, 0
+local rr = 0
+local needRecolor = true
+local laidSize, laidRange, laidTransp
+local seenSize, seenRange, stableSince = Config.RadarSize, Config.RadarRange, 0
+local lastFilter = -10
+
+local function keyOf(wx, wz)
+    return (wx + 32768) * 65536 + (wz + 32768)
+end
+
+local function layoutGrid()
+    cellPx    = Config.RadarSize * PLANE_FACTOR / gridN
+    cellStuds = (PLANE_FACTOR * 2) * Config.RadarRange / gridN
+    Plane.Size = UDim2.fromOffset(cellPx * gridN, cellPx * gridN)
+    local sz = UDim2.fromOffset(math.ceil(cellPx) + 1, math.ceil(cellPx) + 1)
+    for a = 0, gridN - 1 do
+        for b = 0, gridN - 1 do
+            local f = cells[a * gridN + b + 1]
+            f.Size = sz
+            f.Position = UDim2.fromOffset(a * cellPx, b * cellPx)
+        end
+    end
+    laidSize, laidRange = Config.RadarSize, Config.RadarRange
+    seenSize, seenRange = laidSize, laidRange
+    mapColor, mapTime, cacheCount = {}, {}, 0
+    cellColor = {}
+    needRecolor = true
+end
+
+local function buildGrid(n)
+    for _, f in ipairs(cells) do f:Destroy() end
+    cells, cellColor = {}, {}
+    gridN = n
+    laidTransp = Config.MapTransparency
+    for a = 0, n - 1 do
+        for b = 0, n - 1 do
+            local f = Instance.new("Frame")
+            f.BorderSizePixel = 0
+            f.BackgroundColor3 = VOID
+            f.BackgroundTransparency = laidTransp
+            f.Parent = Plane
+            cells[a * n + b + 1] = f
+        end
+    end
+    layoutGrid()
+end
+
+local function sampleCell(wx, wz, refY)
+    local x, z = (wx + 0.5) * cellStuds, (wz + 0.5) * cellStuds
+    local res = Workspace:Raycast(Vector3.new(x, refY + 150, z), Vector3.new(0, -700, 0), mapRayParams)
+    if not res then return VOID end
+
+    local inst, mat = res.Instance, res.Material
+    local col
+    if mat == Enum.Material.Water then
+        col = WATER
+    elseif inst and inst:IsA("Terrain") then
+        local ok, c = pcall(function() return Terrain:GetMaterialColor(mat) end)
+        col = ok and c or Color3.fromRGB(110, 130, 90)
+    elseif inst and inst:IsA("BasePart") then
+        col = inst.Color
+    else
+        col = GREYC
+    end
+
+    local light = 0.72 + 0.28 * math.clamp(res.Normal:Dot(LIGHT), -1, 1)
+    local hgt   = math.clamp(0.82 + (res.Position.Y - refY) / 140, 0.5, 1.3)
+    local k     = light * hgt
+    return Color3.new(math.clamp(col.R * k, 0, 1), math.clamp(col.G * k, 0, 1), math.clamp(col.B * k, 0, 1))
+end
+
+local function updateMap(ctx)
+    if not (Config.Enabled and Config.Radar and Config.RadarMap) then
+        Plane.Visible = false
+        return
+    end
+    Plane.Visible = true
+
+    local n = DETAIL[Config.MapDetail] or 40
+    if n ~= gridN then buildGrid(n) end
+
+    if Config.RadarSize ~= laidSize or Config.RadarRange ~= laidRange then
+        if Config.RadarSize ~= seenSize or Config.RadarRange ~= seenRange then
+            seenSize, seenRange, stableSince = Config.RadarSize, Config.RadarRange, ctx.t
+        elseif ctx.t - stableSince > 0.3 then
+            layoutGrid()
+        end
+    end
+
+    if Config.MapTransparency ~= laidTransp then
+        laidTransp = Config.MapTransparency
+        for i = 1, #cells do cells[i].BackgroundTransparency = laidTransp end
+    end
+
+    if ctx.t - lastFilter > 2 then
+        lastFilter = ctx.t
+        refreshFilter()
+    end
+
+    local px, py, pz = ctx.ppos.X, ctx.ppos.Y, ctx.ppos.Z
+    local pcx, pcz = math.floor(px / cellStuds), math.floor(pz / cellStuds)
+    local total = gridN * gridN
+
+    local ncx0, ncz0 = pcx - gridN / 2, pcz - gridN / 2
+    if ncx0 ~= cx0 or ncz0 ~= cz0 or needRecolor then
+        cx0, cz0 = ncx0, ncz0
+        needRecolor = false
+        for idx = 1, total do
+            local i0 = idx - 1
+            local a = math.floor(i0 / gridN)
+            local b = i0 - a * gridN
+            local col = mapColor[keyOf(cx0 + a, cz0 + b)] or VOID
+            if cellColor[idx] ~= col then
+                cellColor[idx] = col
+                cells[idx].BackgroundColor3 = col
+            end
+        end
+    end
+
+    local K = math.max(24, math.floor(total / 24))
+    for _ = 1, K do
+        rr = rr % total + 1
+        local i0 = rr - 1
+        local a = math.floor(i0 / gridN)
+        local b = i0 - a * gridN
+        local wx, wz = cx0 + a, cz0 + b
+        local key = keyOf(wx, wz)
+        local col = mapColor[key]
+        if not col or ctx.t - (mapTime[key] or 0) > 12 then
+            col = sampleCell(wx, wz, py)
+            if not mapColor[key] then cacheCount += 1 end
+            mapColor[key], mapTime[key] = col, ctx.t
+        end
+        if cellColor[rr] ~= col then
+            cellColor[rr] = col
+            cells[rr].BackgroundColor3 = col
+        end
+    end
+    if cacheCount > 40000 then
+        mapColor, mapTime, cacheCount = {}, {}, 0
+        needRecolor = true
+    end
+
+    local vx = (px / cellStuds - pcx) * cellPx
+    local vz = (pz / cellStuds - pcz) * cellPx
+    local c, s = math.cos(ctx.phi), math.sin(ctx.phi)
+    local R = Config.RadarSize / 2
+    Plane.Position = UDim2.fromOffset(R - (vx * c - vz * s), R - (vx * s + vz * c))
+    Plane.Rotation = math.deg(ctx.phi)
+end
+
+----------------------------------------------------------------------
+-- WATERMARK + HUD
+----------------------------------------------------------------------
+local Watermark = newLabel(Root, 14, Vector2.new(0, 0))
+Watermark.Position = UDim2.fromOffset(12, 12)
+local wmGrad = addGradient(Watermark)
+
+local fps = 60
+
+local function updateHud(ctx, targets)
+    local show = Config.Enabled and Config.Radar
+    Radar.Visible = show
+    if show then
+        local size = Config.RadarSize
+        if Radar.Size.X.Offset ~= size then Radar.Size = UDim2.fromOffset(size, size) end
+        local R = size / 2
+
+        tint(radarStroke, "Color", radarGrad, WHITE, ctx)
+        radarGrad.Rotation = Config.Animations and ((ctx.t * 60) % 360) or 0
+
+        local ang = (ctx.t * 2.2) % (math.pi * 2)
+        for i, s in ipairs(sweeps) do
+            local a = ang - (i - 1) * 0.16
+            setLine(s.f, Vector2.new(R, R), Vector2.new(R + math.cos(a) * (R - 2), R + math.sin(a) * (R - 2)), 2)
+            s.g.Color = ctx.seq or WHITE_SEQ
+        end
+
+        local lv = Camera.CFrame.LookVector
+        if math.abs(lv.X) + math.abs(lv.Z) > 1e-3 then
+            local vp   = Camera.ViewportSize
+            local fovH = 2 * math.atan(math.tan(math.rad(Camera.FieldOfView) / 2) * (vp.X / math.max(vp.Y, 1)))
+            local fwd  = math.atan2(lv.Z, lv.X) + ctx.phi
+            local c0   = Vector2.new(R, R)
+            local col  = ctx.stops and sample(ctx.stops, ctx.phase) or WHITE
+            for i, f in ipairs({ fovL, fovR }) do
+                local a = fwd + (i == 1 and -1 or 1) * fovH / 2
+                setLine(f, c0, c0 + Vector2.new(math.cos(a), math.sin(a)) * R * 1.5, 1)
+                f.BackgroundColor3 = col
+            end
+        else
+            fovL.Visible, fovR.Visible = false, false
+        end
+
+        northLabel.Position = UDim2.fromOffset(R + math.sin(ctx.phi) * (R - 12), R - math.cos(ctx.phi) * (R - 12))
+    end
+
+    Watermark.Visible = Config.Enabled and Config.Watermark
+    if Watermark.Visible then
+        Watermark.Text = string.format("UNIVERSAL ESP   |   %d FPS   |   %d targets", math.floor(fps + 0.5), targets)
+        tint(Watermark, "TextColor3", wmGrad, WHITE, ctx)
+        wmGrad.Rotation = Config.Animations and ((ctx.t * 45) % 360) or 0
+    end
+end
+
+----------------------------------------------------------------------
+-- PER-PLAYER OBJECT
+----------------------------------------------------------------------
+local Objects = {}
+
+local function createESP(plr)
+    if plr == LocalPlayer or Objects[plr] then return end
+    local o = { phase = math.random(), alpha = 0 }
+
+    o.container = newFrame(Root, { Size = UDim2.fromScale(1, 1), Visible = false })
+
+    o.fill       = newFrame(o.container, { BackgroundTransparency = 0.9, BackgroundColor3 = WHITE })
+    o.fillGrad   = addGradient(o.fill)
+    o.fillGrad.Rotation = 90
+    o.glow       = newFrame(o.container)
+    o.glowStroke = addStroke(o.glow, 7)
+    o.glowGrad   = addGradient(o.glowStroke)
+    o.boxOutline = newFrame(o.container)
+    addStroke(o.boxOutline, 3.5, BLACK)
+    o.box        = newFrame(o.container)
+    o.boxStroke  = addStroke(o.box, 1.5)
+    o.boxGrad    = addGradient(o.boxStroke)
+
+    o.corners = {}
+    for i = 1, 8 do
+        local f = newFrame(o.container, { BackgroundTransparency = 0, BackgroundColor3 = WHITE, AnchorPoint = Vector2.new(0.5, 0.5), Visible = false })
+        addStroke(f, 1, BLACK)
+        o.corners[i] = f
+    end
+
+    o.name     = newLabel(o.container, Config.TextSize,     Vector2.new(0.5, 1))
+    o.nameGrad = addGradient(o.name)
+    o.dist     = newLabel(o.container, Config.TextSize - 1, Vector2.new(0.5, 0))
+    o.tool     = newLabel(o.container, Config.TextSize - 1, Vector2.new(0.5, 0))
+    o.tool.TextColor3 = Color3.fromRGB(255, 225, 120)
+    o.hpText   = newLabel(o.container, Config.TextSize - 1, Vector2.new(0, 0))
+
+    o.hpBack = newFrame(o.container, { BackgroundTransparency = 0.2, BackgroundColor3 = BLACK })
+    o.hpFill = newFrame(o.hpBack, {
+        BackgroundTransparency = 0,
+        AnchorPoint = Vector2.new(0, 1),
+        Position = UDim2.new(0, 1, 1, -1),
+    })
+
+    o.tracer     = newFrame(o.container, { BackgroundTransparency = 0.1, BackgroundColor3 = WHITE, AnchorPoint = Vector2.new(0.5, 0.5) })
+    o.tracerGrad = addGradient(o.tracer)
+    o.look       = newFrame(o.container, { BackgroundTransparency = 0.1, BackgroundColor3 = WHITE, AnchorPoint = Vector2.new(0.5, 0.5) })
+    o.lookGrad   = addGradient(o.look)
+
+    o.head = newFrame(o.container, { AnchorPoint = Vector2.new(0.5, 0.5) })
+    addCorner(o.head)
+    o.headStroke = addStroke(o.head, 1.5)
+    o.headGrad   = addGradient(o.headStroke)
+
+    o.bones = {}
+    for i = 1, MAX_BONES do
+        local f = newFrame(o.container, { BackgroundTransparency = 0.05, BackgroundColor3 = WHITE, AnchorPoint = Vector2.new(0.5, 0.5), Visible = false })
+        addStroke(f, 0.8, BLACK)
+        o.bones[i] = f
+    end
+
+    o.arrow     = newFrame(Root, { Size = UDim2.fromScale(1, 1), Visible = false })
+    o.arrowLine = newFrame(o.arrow, { BackgroundTransparency = 0.1, BackgroundColor3 = WHITE, AnchorPoint = Vector2.new(0.5, 0.5) })
+    o.arrowDot  = newFrame(o.arrow, { BackgroundTransparency = 0, BackgroundColor3 = WHITE, AnchorPoint = Vector2.new(0.5, 0.5) })
+    addCorner(o.arrowDot)
+    addStroke(o.arrowDot, 1.5, BLACK)
+    o.arrowText = newLabel(o.arrow, Config.TextSize - 1, Vector2.new(0.5, 0.5))
+
+    o.radarDot = newFrame(Radar, { BackgroundTransparency = 0, BackgroundColor3 = WHITE, AnchorPoint = Vector2.new(0.5, 0.5), Visible = false })
+    addCorner(o.radarDot)
+    addStroke(o.radarDot, 1, BLACK)
+
+    o.cham = Instance.new("Highlight")
+    o.cham.Name                = "Cham"
+    o.cham.OutlineTransparency = 0
+    o.cham.DepthMode           = Enum.HighlightDepthMode.AlwaysOnTop
+    o.cham.Enabled             = false
+
+    Objects[plr] = o
+end
+
+local function hide(o)
+    o.container.Visible = false
+    o.arrow.Visible     = false
+    o.radarDot.Visible  = false
+    o.cham.Enabled      = false
+    o.alpha             = 0
+end
+
+local function destroyESP(plr)
+    local o = Objects[plr]
+    if not o then return end
+    o.container:Destroy()
+    o.arrow:Destroy()
+    o.radarDot:Destroy()
+    o.cham:Destroy()
+    Objects[plr] = nil
+end
+
+----------------------------------------------------------------------
+-- MINIMAP DOT + OFF-SCREEN ARROW
+----------------------------------------------------------------------
+local function updateRadarDot(o, root, base, ctx)
+    if not Config.Radar then o.radarDot.Visible = false return end
+
+    local R   = Config.RadarSize / 2
+    local rel = root.Position - ctx.ppos
+    local c, s = math.cos(ctx.phi), math.sin(ctx.phi)
+    local p = Vector2.new(rel.X * c - rel.Z * s, rel.X * s + rel.Z * c) * (R / Config.RadarRange)
+
+    local lim = R * 0.94
+    local m   = math.max(math.abs(p.X), math.abs(p.Y))
+    local clamped = m > lim
+    if clamped then p = p * (lim / m) end
+
+    local size = Config.Animations and (7 + 1.5 * math.sin(ctx.t * 5 + o.phase * 6.28)) or 7
+    o.radarDot.Position = UDim2.fromOffset(R + p.X, R + p.Y)
+    o.radarDot.Size = UDim2.fromOffset(size, size)
+    o.radarDot.BackgroundColor3 = colorAt(ctx, base, o.phase)
+    o.radarDot.BackgroundTransparency = clamped and 0.5 or 0
+    o.radarDot.Visible = true
+end
+
+local function updateArrow(o, root, base, distance, ctx)
+    if not Config.Arrows then o.arrow.Visible = false return end
+    local vp  = Camera.ViewportSize
+    local rel = Camera.CFrame:PointToObjectSpace(root.Position)
+    local dir = Vector2.new(rel.X, -rel.Y)
+    if dir.Magnitude < 1e-3 then dir = Vector2.new(0, 1) end
+    local u = dir.Unit
+
+    local p = vp / 2 + u * (math.min(vp.X, vp.Y) * Config.ArrowRadius)
+    local col = colorAt(ctx, base, o.phase)
+    local dot = Config.Animations and (9 + 3 * math.sin(ctx.t * 6 + o.phase * 6.28)) or 10
+
+    o.arrow.Visible = true
+    setLine(o.arrowLine, p - u * 20, p, 3)
+    o.arrowLine.BackgroundColor3 = col
+    o.arrowDot.Position = UDim2.fromOffset(p.X, p.Y)
+    o.arrowDot.Size = UDim2.fromOffset(dot, dot)
+    o.arrowDot.BackgroundColor3 = col
+    o.arrowText.Text = string.format("%dm", math.floor(distance))
+    o.arrowText.TextSize = Config.TextSize - 1
+    o.arrowText.Position = UDim2.fromOffset(p.X + u.X * 26, p.Y + u.Y * 26)
+end
+
+----------------------------------------------------------------------
+-- UPDATE
+----------------------------------------------------------------------
+local function update(plr, o, ctx)
+    local char = plr.Character
+    local hum  = char and char:FindFirstChildOfClass("Humanoid")
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+
+    if not (Config.Enabled and char and hum and root and hum.Health > 0) then return hide(o) end
+    if Config.TeamCheck and isTeammate(plr) then return hide(o) end
+
+    local distance = (root.Position - Camera.CFrame.Position).Magnitude
+    if distance > Config.MaxDistance then return hide(o) end
+
+    ctx.targets = ctx.targets + 1
+    local base = staticColor(plr)
+
+    updateRadarDot(o, root, base, ctx)
+
+    if o.cham.Parent ~= char then o.cham.Parent = char end
+    o.cham.Adornee      = char
+    o.cham.FillColor    = colorAt(ctx, base, 0)
+    o.cham.OutlineColor = colorAt(ctx, base, 0.5)
+    local fillT = Config.ChamFill
+    if Config.Animations then fillT = fillT + 0.12 * math.sin(ctx.t * 3 + o.phase * 6.28) end
+    o.cham.FillTransparency = math.clamp(fillT, 0, 1)
+    o.cham.Enabled = Config.Chams
+
+    local rootPos, onScreen, depth = worldToScreen(root.Position)
+    if not onScreen or depth <= 0 then
+        o.container.Visible = false
+        o.alpha = 0
+        updateArrow(o, root, base, distance, ctx)
+        return
+    end
+    o.arrow.Visible     = false
+    o.container.Visible = true
+
+    o.alpha = math.min(1, o.alpha + ctx.dt * (Config.Animations and 5 or 100))
+    local a    = o.alpha
+    local ease = 1 - (1 - a) ^ 3
+    local tA   = 1 - a
+
+    local topPos    = worldToScreen(root.Position + Vector3.new(0, 3, 0))
+    local bottomPos = worldToScreen(root.Position - Vector3.new(0, 3.5, 0))
+    local h  = math.abs(bottomPos.Y - topPos.Y)
+    local w  = h / 2
+    local bx = rootPos.X - w / 2
+    local by = topPos.Y
+
+    local sc = Config.Animations and (1.35 - 0.35 * ease) or 1
+    local sw, sh = w * sc, h * sc
+    local sx, sy = rootPos.X - sw / 2, by + h / 2 - sh / 2
+    local pos, size = UDim2.fromOffset(sx, sy), UDim2.fromOffset(sw, sh)
+
+    local showBox = Config.Boxes
+    local full    = showBox and Config.BoxStyle ~= "Corners"
+    local corners = showBox and Config.BoxStyle == "Corners"
+    local spin    = Config.Animations and ((ctx.t * 90) % 360) or 0
+
+    o.fill.Visible = showBox and Config.BoxFill
+    if o.fill.Visible then
+        o.fill.Position, o.fill.Size = pos, size
+        o.fill.BackgroundTransparency = 1 - (1 - Config.FillTransparency) * a
+        tint(o.fill, "BackgroundColor3", o.fillGrad, base, ctx)
+    end
+
+    o.glow.Visible = showBox and Config.Glow
+    if o.glow.Visible then
+        o.glow.Position, o.glow.Size = pos, size
+        local pulse = Config.Animations and (0.68 + 0.2 * math.sin(ctx.t * 4 + o.phase * 6.28)) or 0.75
+        o.glowStroke.Transparency = 1 - (1 - pulse) * a
+        o.glowGrad.Rotation = spin
+        tint(o.glowStroke, "Color", o.glowGrad, base, ctx)
+    end
+
+    o.boxOutline.Visible = full
+    o.box.Visible        = full
+    if full then
+        o.boxOutline.Position, o.boxOutline.Size = pos, size
+        o.box.Position, o.box.Size = pos, size
+        o.boxStroke.Transparency = tA
+        o.boxGrad.Rotation = spin
+        tint(o.boxStroke, "Color", o.boxGrad, base, ctx)
+    end
+
+    local L = math.min(sw, sh) * 0.28
+    local x0, y0, x1, y1 = sx, sy, sx + sw, sy + sh
+    local segs = {
+        { Vector2.new(x0, y0), Vector2.new(x0 + L, y0) }, { Vector2.new(x0, y0), Vector2.new(x0, y0 + L) },
+        { Vector2.new(x1, y0), Vector2.new(x1 - L, y0) }, { Vector2.new(x1, y0), Vector2.new(x1, y0 + L) },
+        { Vector2.new(x0, y1), Vector2.new(x0 + L, y1) }, { Vector2.new(x0, y1), Vector2.new(x0, y1 - L) },
+        { Vector2.new(x1, y1), Vector2.new(x1 - L, y1) }, { Vector2.new(x1, y1), Vector2.new(x1, y1 - L) },
+    }
+    for i = 1, 8 do
+        local f = o.corners[i]
+        if corners then
+            setLine(f, segs[i][1], segs[i][2], 2.5)
+            f.BackgroundColor3 = colorAt(ctx, base, math.ceil(i / 2) / 4)
+            f.BackgroundTransparency = tA
+        else
+            f.Visible = false
+        end
+    end
+
+    o.name.Visible = Config.Names
+    if Config.Names then
+        o.name.Text = (plr.DisplayName ~= plr.Name) and (plr.DisplayName .. " [" .. plr.Name .. "]") or plr.Name
+        o.name.TextSize = Config.TextSize
+        o.name.Position = UDim2.fromOffset(rootPos.X, by - 4)
+        o.name.TextTransparency, o.name.TextStrokeTransparency = tA, tA
+        tint(o.name, "TextColor3", o.nameGrad, base, ctx)
+    end
+
+    local lineY = by + h + 3
+    o.dist.Visible = Config.Distance
+    if Config.Distance then
+        o.dist.Text = string.format("%dm", math.floor(distance))
+        o.dist.TextSize = Config.TextSize - 1
+        o.dist.Position = UDim2.fromOffset(rootPos.X, lineY)
+        o.dist.TextTransparency, o.dist.TextStrokeTransparency = tA, tA
+        lineY = lineY + Config.TextSize + 1
+    end
+    local tool = Config.Tool and char:FindFirstChildOfClass("Tool")
+    o.tool.Visible = tool and true or false
+    if tool then
+        o.tool.Text = tool.Name
+        o.tool.TextSize = Config.TextSize - 1
+        o.tool.Position = UDim2.fromOffset(rootPos.X, lineY)
+        o.tool.TextTransparency, o.tool.TextStrokeTransparency = tA, tA
+    end
+
+    local frac = math.clamp(hum.Health / math.max(hum.MaxHealth, 1), 0, 1)
+    o.hpShown = o.hpShown and (o.hpShown + (frac - o.hpShown) * math.min(ctx.dt * 10, 1)) or frac
+    local col = hpColor(frac)
+    o.hpBack.Visible = Config.Health
+    if Config.Health then
+        o.hpBack.Position = UDim2.fromOffset(bx - 7, by - 1)
+        o.hpBack.Size = UDim2.fromOffset(4, h + 2)
+        o.hpFill.Size = UDim2.fromOffset(2, math.max(math.floor(h * o.hpShown), 0))
+        o.hpFill.BackgroundColor3 = col
+        o.hpFill.BackgroundTransparency = (Config.Animations and frac < 0.3) and (0.35 + 0.35 * math.sin(ctx.t * 9)) or 0
+    end
+    o.hpText.Visible = Config.Health and Config.HealthText
+    if o.hpText.Visible then
+        o.hpText.Text = tostring(math.ceil(hum.Health))
+        o.hpText.TextSize = Config.TextSize - 1
+        o.hpText.TextColor3 = col
+        o.hpText.Position = UDim2.fromOffset(bx + w + 5, by)
+        o.hpText.TextTransparency, o.hpText.TextStrokeTransparency = tA, tA
+    end
+
+    if Config.Tracers then
+        setLine(o.tracer, tracerStart(), Vector2.new(rootPos.X, by + h), 1.5)
+        o.tracer.BackgroundTransparency = 0.1 + 0.9 * tA
+        tint(o.tracer, "BackgroundColor3", o.tracerGrad, base, ctx)
+    else
+        o.tracer.Visible = false
+    end
+
+    local headPart = char:FindFirstChild("Head")
+    if headPart and Config.HeadDot then
+        local p = worldToScreen(headPart.Position)
+        local r = math.clamp(h / 12, 2, 12)
+        o.head.Position = UDim2.fromOffset(p.X, p.Y)
+        o.head.Size = UDim2.fromOffset(r * 2, r * 2)
+        o.head.Visible = true
+        o.headStroke.Transparency = tA
+        tint(o.headStroke, "Color", o.headGrad, base, ctx)
+    else
+        o.head.Visible = false
+    end
+
+    o.look.Visible = false
+    if headPart and Config.LookDir then
+        local p1 = worldToScreen(headPart.Position)
+        local p2, _, d2 = worldToScreen(headPart.Position + headPart.CFrame.LookVector * 12)
+        if d2 > 0 then
+            setLine(o.look, p1, p2, 1.5)
+            o.look.BackgroundTransparency = 0.1 + 0.9 * tA
+            tint(o.look, "BackgroundColor3", o.lookGrad, base, ctx)
+        end
+    end
+
+    local bones = (hum.RigType == Enum.HumanoidRigType.R15) and R15_BONES or R6_BONES
+    for i = 1, MAX_BONES do
+        local line, pair = o.bones[i], bones[i]
+        if Config.Skeleton and pair then
+            local pa_, pb_ = char:FindFirstChild(pair[1]), char:FindFirstChild(pair[2])
+            if pa_ and pb_ then
+                local pa, _, da = worldToScreen(pa_.Position)
+                local pb, _, db = worldToScreen(pb_.Position)
+                if da > 0 and db > 0 then
+                    setLine(line, pa, pb, 1.5)
+                    line.BackgroundColor3 = colorAt(ctx, base, i / MAX_BONES)
+                    line.BackgroundTransparency = 0.05 + 0.95 * tA
+                else
+                    line.Visible = false
+                end
+            else
+                line.Visible = false
+            end
+        else
+            line.Visible = false
+        end
+    end
+end
+
+----------------------------------------------------------------------
+-- WIRING
+----------------------------------------------------------------------
+for _, plr in ipairs(Players:GetPlayers()) do createESP(plr) end
+
+local conns = {}
+table.insert(conns, Players.PlayerAdded:Connect(createESP))
+table.insert(conns, Players.PlayerRemoving:Connect(destroyESP))
+
+table.insert(conns, UserInputService.InputBegan:Connect(function(input, gpe)
+    if not gpe and input.KeyCode == Config.ToggleKey then
+        Config.Enabled = not Config.Enabled
+    end
+end))
+
+local lastErr
+local function report(tag, err)
+    if err ~= lastErr then
+        lastErr = err
+        warn("[ESP] " .. tag .. " error: " .. tostring(err))
+    end
+end
+
+table.insert(conns, RunService.RenderStepped:Connect(function(dt)
+    Camera = Workspace.CurrentCamera
+    fps = fps + (1 / math.max(dt, 1e-4) - fps) * 0.1
+
+    local t     = os.clock()
+    local stops = currentStops()
+    local phase = t * Config.ThemeSpeed
+
+    local lchar = LocalPlayer.Character
+    local lroot = lchar and lchar:FindFirstChild("HumanoidRootPart")
+
+    local ctx = {
+        t = t, dt = dt, stops = stops, phase = phase,
+        seq = stops and buildSeq(stops, phase) or nil,
+        targets = 0,
+        ppos = lroot and lroot.Position or Camera.CFrame.Position,
+        phi = radarPhi(),
+    }
+
+    local okMap, errMap = pcall(updateMap, ctx)
+    if not okMap then report("map", errMap) end
+
+    for plr, o in pairs(Objects) do
+        local ok, err = pcall(update, plr, o, ctx)
+        if not ok then
+            hide(o)
+            report("update", err)
+        end
+    end
+
+    local okHud, errHud = pcall(updateHud, ctx, ctx.targets)
+    if not okHud then report("hud", errHud) end
+end))
+
+----------------------------------------------------------------------
+-- UNLOAD
+----------------------------------------------------------------------
+getgenv().ESP_Config = Config
+getgenv().ESP_Unload = function()
+    for _, c in ipairs(conns) do c:Disconnect() end
+    for plr in pairs(Objects) do destroyESP(plr) end
+    Root:Destroy()
+    getgenv().ESP_Unload = nil
+end
+
+print("[ESP] v5 loaded (Headless Mode) - RightShift to toggle")
