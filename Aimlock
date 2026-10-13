@@ -1,0 +1,397 @@
+-- Delta Aimlock v19 | Roblox (Luau) | Delta executor | Rayfield UI
+-- v17 targeting logic + menu + stability fixes. Unload: getgenv().DeltaAimlockUnload()
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local CoreGui = game:GetService("CoreGui")
+
+local LocalPlayer = Players.LocalPlayer
+
+if getgenv and getgenv().DeltaAimlockUnload then
+    pcall(getgenv().DeltaAimlockUnload)
+end
+
+local Settings = {
+    Active = true,
+    AimPart = "Head",
+    TargetPlayers = true,
+    TargetNPCs = true,
+    TeamCheck = true,
+    WallCheck = true,
+    UseFOV = true,
+    FOVRadius = 250,
+    Smoothing = 2,        -- 0.05 - 2, 2 = hard lock (instant), lower = softer pull
+    MaxDistance = 500,
+}
+
+local MIN_DIST = 2        -- ignore anything this close (viewmodels / rigs on the camera)
+local MAX_RAYS = 10       -- wall-check budget per frame
+local STICKY = 0.7        -- current target's score multiplier; lower = harder to lose the lock
+
+local Connections = {}
+local CurrentPart, CurrentChar = nil, nil
+local NPCs = {}
+local MainToggle = nil
+
+-- ============================== TEAM DETECTION ==============================
+local TEAM_KEYS = { "Team", "TeamName", "TeamColor", "TeamID" }
+
+local function GetNpcTeam(model)
+    for _, key in ipairs(TEAM_KEYS) do
+        local attr = model:GetAttribute(key)
+        if attr ~= nil then return tostring(attr):lower() end
+        local val = model:FindFirstChild(key)
+        if val and val:IsA("ValueBase") then return tostring(val.Value):lower() end
+    end
+    return nil
+end
+
+local function GetLocalTeamKeys()
+    local keys = {}
+    if LocalPlayer.Team then keys[LocalPlayer.Team.Name:lower()] = true end
+    keys[tostring(LocalPlayer.TeamColor):lower()] = true
+    for _, key in ipairs(TEAM_KEYS) do
+        local attr = LocalPlayer:GetAttribute(key)
+        if attr ~= nil then keys[tostring(attr):lower()] = true end
+        local char = LocalPlayer.Character
+        local cattr = char and char:GetAttribute(key)
+        if cattr ~= nil then keys[tostring(cattr):lower()] = true end
+    end
+    return keys
+end
+
+-- localKeys is built once per frame and passed in (v17 rebuilt it for every NPC)
+local function IsSameTeam(model, isPlayer, localKeys)
+    if not Settings.TeamCheck then return false end
+    if isPlayer then
+        local player = Players:GetPlayerFromCharacter(model)
+        if player and player.Team and LocalPlayer.Team then
+            return player.Team == LocalPlayer.Team
+        end
+        return false
+    end
+    local npcTeam = GetNpcTeam(model)
+    return npcTeam ~= nil and localKeys[npcTeam] == true
+end
+
+-- ============================== REGISTRATION ==============================
+local function RegisterModel(model)
+    if not model or not model:IsA("Model") then return end
+    if Players:GetPlayerFromCharacter(model) then return end
+    if model == LocalPlayer.Character or model.Name == LocalPlayer.Name then return end
+    local cam = workspace.CurrentCamera
+    if cam and model:IsDescendantOf(cam) then return end -- first-person viewmodels
+    if model:FindFirstChildOfClass("Humanoid") then
+        NPCs[model] = true
+    end
+end
+
+for _, inst in ipairs(workspace:GetDescendants()) do
+    if inst:IsA("Model") then RegisterModel(inst) end
+end
+
+table.insert(Connections, workspace.DescendantAdded:Connect(function(inst)
+    if inst:IsA("Model") then task.defer(RegisterModel, inst) end
+end))
+
+table.insert(Connections, workspace.DescendantRemoving:Connect(function(inst)
+    if inst:IsA("Model") then NPCs[inst] = nil end
+end))
+
+-- ============================== TARGETING ENGINE ==============================
+local function IsAlive(char)
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    return hum ~= nil and hum.Health > 0
+end
+
+local function GetBestPart(char)
+    local head = char:FindFirstChild("Head", true)
+    local torso = char:FindFirstChild("Torso", true) or char:FindFirstChild("UpperTorso", true)
+    local root = char:FindFirstChild("HumanoidRootPart", true) or char.PrimaryPart
+
+    local list = Settings.AimPart == "Head" and { head, torso, root } or { torso, root, head }
+    for _, p in ipairs(list) do
+        if p and p:IsA("BasePart") then return p end
+    end
+
+    for _, desc in ipairs(char:GetDescendants()) do
+        if desc:IsA("BasePart") and desc.Transparency < 1 then return desc end
+    end
+    return nil
+end
+
+-- one reused RaycastParams (v17 made a new one per candidate per frame)
+local rayParams = RaycastParams.new()
+rayParams.FilterType = Enum.RaycastFilterType.Exclude
+rayParams.IgnoreWater = true
+
+local function IsVisible(part, char, camera)
+    local origin = camera.CFrame.Position
+    local direction = part.Position - origin
+
+    local ignore = { char, camera }
+    if LocalPlayer.Character then table.insert(ignore, LocalPlayer.Character) end
+
+    for _ = 1, 10 do
+        rayParams.FilterDescendantsInstances = ignore
+        local result = workspace:Raycast(origin, direction, rayParams)
+        if not result then return true end
+
+        local inst = result.Instance
+        if inst:IsDescendantOf(char) then return true end
+
+        local model = inst:FindFirstAncestorOfClass("Model")
+        if model and model:FindFirstChildOfClass("Humanoid") then
+            table.insert(ignore, model)          -- another body, not a wall
+        elseif inst.Transparency >= 0.9 or not inst.CanCollide then
+            table.insert(ignore, inst)           -- glass, triggers, invisible parts
+        else
+            return false
+        end
+    end
+    return false
+end
+
+local function FindTarget(camera)
+    local center = camera.ViewportSize / 2
+    local camPos = camera.CFrame.Position
+    local localKeys = Settings.TeamCheck and GetLocalTeamKeys() or {}
+    local scored = {}
+
+    local function consider(char, isPlayer)
+        if IsSameTeam(char, isPlayer, localKeys) then return end
+        local part = GetBestPart(char)
+        if not part then return end
+
+        local pos3 = part.Position
+        local dist = (pos3 - camPos).Magnitude
+        if dist ~= dist or dist < MIN_DIST or dist > Settings.MaxDistance then return end
+
+        local pos, onScreen = camera:WorldToViewportPoint(pos3)
+        if not onScreen then return end -- always required, so it never spins to someone behind you
+
+        local screenDist = (Vector2.new(pos.X, pos.Y) - center).Magnitude
+        if Settings.UseFOV and screenDist > Settings.FOVRadius then return end
+
+        local score = screenDist
+        if char == CurrentChar then score = score * STICKY end -- stops flipping between two close targets
+        table.insert(scored, { score = score, part = part, char = char })
+    end
+
+    if Settings.TargetPlayers then
+        for _, p in ipairs(Players:GetPlayers()) do
+            if p ~= LocalPlayer and p.Character and IsAlive(p.Character) then
+                consider(p.Character, true)
+            end
+        end
+    end
+
+    if Settings.TargetNPCs then
+        for model in pairs(NPCs) do
+            if not model.Parent then
+                NPCs[model] = nil
+            elseif model:IsDescendantOf(camera) then
+                NPCs[model] = nil
+            elseif IsAlive(model) then
+                consider(model, false)
+            end
+        end
+    end
+
+    table.sort(scored, function(a, b) return a.score < b.score end)
+
+    if not Settings.WallCheck then
+        local e = scored[1]
+        if e then return e.part, e.char end
+        return nil, nil
+    end
+
+    -- raycast only down the sorted list, capped per frame
+    for i, e in ipairs(scored) do
+        if i > MAX_RAYS then break end
+        if IsVisible(e.part, e.char, camera) then
+            return e.part, e.char
+        end
+    end
+    return nil, nil
+end
+
+-- ============================== AIM MATH ==============================
+-- guards against NaN and the flip when the target is straight above/below the camera
+local function LookCF(from, to)
+    local dir = to - from
+    if dir.Magnitude < 0.05 or dir.X ~= dir.X or dir.Y ~= dir.Y or dir.Z ~= dir.Z then
+        return nil
+    end
+    local up = Vector3.yAxis
+    if math.abs(dir.Unit:Dot(up)) > 0.999 then up = Vector3.zAxis end
+    return CFrame.lookAt(from, to, up)
+end
+
+-- ============================== OVERLAY UI ==============================
+local Gui = Instance.new("ScreenGui")
+Gui.Name = "DeltaAimlockOverlay"
+Gui.ResetOnSpawn = false
+Gui.IgnoreGuiInset = true
+Gui.DisplayOrder = 999
+pcall(function() Gui.Parent = (gethui and gethui()) or CoreGui end)
+if not Gui.Parent then Gui.Parent = LocalPlayer:WaitForChild("PlayerGui") end
+
+local FOVFrame = Instance.new("Frame")
+FOVFrame.AnchorPoint = Vector2.new(0.5, 0.5)
+FOVFrame.BackgroundTransparency = 1
+FOVFrame.Parent = Gui
+Instance.new("UICorner", FOVFrame).CornerRadius = UDim.new(1, 0)
+local FOVStroke = Instance.new("UIStroke", FOVFrame)
+FOVStroke.Thickness = 1.5
+FOVStroke.Color = Color3.new(1, 1, 1)
+
+local Button = Instance.new("TextButton")
+Button.Size = UDim2.fromOffset(64, 64)
+Button.Position = UDim2.new(1, -90, 0.5, -32)
+Button.BackgroundColor3 = Color3.fromRGB(30, 30, 38)
+Button.TextColor3 = Color3.new(1, 1, 1)
+Button.Font = Enum.Font.GothamBold
+Button.TextSize = 13
+Button.Parent = Gui
+Instance.new("UICorner", Button).CornerRadius = UDim.new(1, 0)
+local ButtonStroke = Instance.new("UIStroke", Button)
+ButtonStroke.Thickness = 2
+
+local function Refresh()
+    Button.Text = Settings.Active and "AIM\nON" or "AIM\nOFF"
+    ButtonStroke.Color = Settings.Active and Color3.fromRGB(80, 220, 120) or Color3.fromRGB(120, 120, 130)
+end
+
+local function SetActive(v)
+    Settings.Active = v
+    if not v then CurrentPart, CurrentChar = nil, nil end
+    Refresh()
+end
+
+table.insert(Connections, Button.Activated:Connect(function()
+    SetActive(not Settings.Active)
+    if MainToggle then pcall(function() MainToggle:Set(Settings.Active) end) end
+end))
+Refresh()
+
+-- ============================== RENDER STEP ==============================
+local STEP_NAME = "DeltaAimlockV19"
+
+RunService:BindToRenderStep(STEP_NAME, Enum.RenderPriority.Last.Value + 1, function(dt)
+    local camera = workspace.CurrentCamera
+    if not camera then return end
+
+    local center = camera.ViewportSize / 2
+    FOVFrame.Visible = Settings.Active and Settings.UseFOV
+    FOVFrame.Size = UDim2.fromOffset(Settings.FOVRadius * 2, Settings.FOVRadius * 2)
+    FOVFrame.Position = UDim2.fromOffset(center.X, center.Y)
+
+    if not Settings.Active then return end
+
+    local part, char = FindTarget(camera)
+    if part and char then
+        CurrentPart, CurrentChar = part, char
+
+        local camCF = camera.CFrame
+        local goal = LookCF(camCF.Position, part.Position)
+        if goal then
+            -- snap speed 0.05 - 2: s/2 is the per-frame (at 60fps) pull, so 2 = instant hard lock
+            local s = math.clamp(Settings.Smoothing, 0.05, 2)
+            local alpha = (s >= 1.98) and 1 or (1 - (1 - s / 2) ^ (dt * 60))
+            camera.CFrame = camCF:Lerp(goal, alpha)
+        end
+    else
+        CurrentPart, CurrentChar = nil, nil
+    end
+end)
+
+-- ============================== UNLOAD ==============================
+local function Unload()
+    pcall(function() RunService:UnbindFromRenderStep(STEP_NAME) end)
+    for _, c in ipairs(Connections) do pcall(function() c:Disconnect() end) end
+    table.clear(Connections)
+    table.clear(NPCs)
+    Gui:Destroy()
+    if getgenv then getgenv().DeltaAimlockUnload = nil end
+end
+if getgenv then getgenv().DeltaAimlockUnload = Unload end
+
+-- ============================== RAYFIELD MENU ==============================
+local function Pick(o)
+    return type(o) == "table" and o[1] or o
+end
+
+task.spawn(function()
+    local ok, Rayfield = pcall(function()
+        return loadstring(game:HttpGet("https://sirius.menu/rayfield"))()
+    end)
+    if not (ok and Rayfield) then return end -- still works through the AIM button
+
+    pcall(function()
+        local Window = Rayfield:CreateWindow({
+            Name = "Delta Aimlock v19",
+            LoadingTitle = "Delta Aimlock",
+            LoadingSubtitle = "v19",
+            ConfigurationSaving = { Enabled = false },
+            Discord = { Enabled = false },
+            KeySystem = false,
+        })
+
+        local Tab = Window:CreateTab("Aimlock", 4483362458)
+
+        MainToggle = Tab:CreateToggle({
+            Name = "Aimlock", CurrentValue = true, Flag = "Active",
+            Callback = function(v) SetActive(v) end,
+        })
+
+        Tab:CreateToggle({
+            Name = "Target Players", CurrentValue = true, Flag = "TPlayers",
+            Callback = function(v) Settings.TargetPlayers = v end,
+        })
+
+        Tab:CreateToggle({
+            Name = "Target NPCs", CurrentValue = true, Flag = "TNPCs",
+            Callback = function(v) Settings.TargetNPCs = v end,
+        })
+
+        Tab:CreateToggle({
+            Name = "Team Check", CurrentValue = true, Flag = "Team",
+            Callback = function(v) Settings.TeamCheck = v end,
+        })
+
+        Tab:CreateToggle({
+            Name = "Wall Check", CurrentValue = true, Flag = "Wall",
+            Callback = function(v) Settings.WallCheck = v end,
+        })
+
+        Tab:CreateToggle({
+            Name = "FOV Filter", CurrentValue = true, Flag = "UseFOV",
+            Callback = function(v) Settings.UseFOV = v end,
+        })
+
+        Tab:CreateDropdown({
+            Name = "Aim Part", Options = { "Head", "Torso" },
+            CurrentOption = { "Head" }, MultipleOptions = false, Flag = "AimPart",
+            Callback = function(o) Settings.AimPart = Pick(o) end,
+        })
+
+        Tab:CreateSlider({
+            Name = "FOV Size", Range = { 50, 700 }, Increment = 10,
+            Suffix = " px", CurrentValue = 250, Flag = "FOV",
+            Callback = function(v) Settings.FOVRadius = v end,
+        })
+
+        Tab:CreateSlider({
+            Name = "Max Distance", Range = { 50, 3000 }, Increment = 50,
+            Suffix = " studs", CurrentValue = 500, Flag = "MaxDist",
+            Callback = function(v) Settings.MaxDistance = v end,
+        })
+
+        Tab:CreateSlider({
+            Name = "Snap Speed (2 = hard lock)", Range = { 0.05, 2 }, Increment = 0.05,
+            CurrentValue = 2, Flag = "Snap",
+            Callback = function(v) Settings.Smoothing = v end,
+        })
+    end)
+end)
