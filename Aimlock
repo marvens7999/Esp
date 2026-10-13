@@ -225,12 +225,55 @@ local function LookCF(from, to)
     return CFrame.lookAt(from, to, up)
 end
 
+-- ============================== FOV CIRCLE [EDIT 3] ==============================
+-- Draws the FOV circle on screen. Shown only while Active and UseFOV are ON.
+local FOVGui, FOVCircle = nil, nil
+
+pcall(function()
+    local parent = (gethui and gethui()) or LocalPlayer:WaitForChild("PlayerGui")
+    FOVGui = Instance.new("ScreenGui")
+    FOVGui.Name = "DeltaAimlockFOV"
+    FOVGui.ResetOnSpawn = false
+    FOVGui.IgnoreGuiInset = true
+    FOVGui.DisplayOrder = 999
+    FOVGui.Parent = parent
+
+    FOVCircle = Instance.new("Frame")
+    FOVCircle.AnchorPoint = Vector2.new(0.5, 0.5)
+    FOVCircle.Position = UDim2.fromScale(0.5, 0.5)
+    FOVCircle.BackgroundTransparency = 1
+    FOVCircle.BorderSizePixel = 0
+    FOVCircle.Visible = false
+    FOVCircle.Parent = FOVGui
+
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0.5, 0)
+    corner.Parent = FOVCircle
+
+    local stroke = Instance.new("UIStroke")
+    stroke.Color = Color3.fromRGB(153, 75, 255)
+    stroke.Thickness = 1.5
+    stroke.Parent = FOVCircle
+end)
+
+local function UpdateFOVCircle()
+    if not FOVCircle then return end
+    local show = Settings.Active and Settings.UseFOV
+    FOVCircle.Visible = show == true
+    if show then
+        local d = Settings.FOVRadius * 2
+        FOVCircle.Size = UDim2.fromOffset(d, d)
+    end
+end
+
 -- ============================== RENDER STEP ==============================
 local STEP_NAME = "DeltaAimlockV19"
 
 RunService:BindToRenderStep(STEP_NAME, Enum.RenderPriority.Last.Value + 1, function(dt)
     local camera = workspace.CurrentCamera
     if not camera then return end
+
+    UpdateFOVCircle() -- [EDIT 3]
 
     if not Settings.Active then return end
 
@@ -256,6 +299,7 @@ local function Unload()
     for _, c in ipairs(Connections) do pcall(function() c:Disconnect() end) end
     table.clear(Connections)
     table.clear(NPCs)
+    if FOVGui then pcall(function() FOVGui:Destroy() end) end -- [EDIT 3]
     -- [EDIT 2] also clear the shared config on unload
     if getgenv then
         getgenv().DeltaAimlockUnload = nil
